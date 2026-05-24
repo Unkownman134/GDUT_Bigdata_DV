@@ -1,21 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-Spark Streaming 微博版 v2
+Spark Streaming 微博版 v2 - Linux 版本
 分析焦点: 帖子正文(情感/关键词) + 发帖量 + 用户分析
 """
 import json, mysql.connector, sys, os
 
-os.environ["HADOOP_HOME"] = "J:/Project/trae_projects/Bigdata/Hadoop"
+# 项目根目录
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"), "r", encoding="utf-8") as _f:
+# 加载配置
+with open(os.path.join(project_root, "config.json"), "r", encoding="utf-8") as _f:
     CFG = json.load(_f)
 MYSQL = CFG["mysql"]
 KAFKA_BOOTSTRAP = CFG["kafka"]["bootstrap_servers"]
 KAFKA_TOPIC = CFG["kafka"]["topic"]
-DICT_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "gaokao_dict.txt")
+DICT_PATH = os.path.join(project_root, "data", "gaokao_dict.txt")
 
-# jieba 缓存目录设到项目目录，避免占用 C 盘
-os.environ["JIEBA_CACHE_DIR"] = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".cache")
+# jieba 缓存目录设到项目目录
+os.environ["JIEBA_CACHE_DIR"] = os.path.join(project_root, ".cache")
 
 from snownlp import SnowNLP
 import jieba
@@ -94,18 +96,20 @@ def batch_write(rows, table, columns):
         print(f"  MySQL写入失败 [{table}]: {e}")
 
 
-# ==================== Spark ====================
+# ==================== Spark 配置 (Linux 版本) ====================
+spark_tmp_dir = os.path.join(project_root, "..", "spark-tmp")
+spark_checkpoint_dir = os.path.join(project_root, "..", "spark-checkpoint")
+ivy_dir = os.path.join(project_root, "..", "spark-ivy")
+
 spark = SparkSession.builder \
     .appName("GaokaoWeibo") \
     .master("local[*]") \
     .config("spark.sql.shuffle.partitions", "2") \
     .config("spark.default.parallelism", "2") \
-    .config("spark.hadoop.home.dir", "J:/Project/trae_projects/Bigdata/Hadoop") \
-    .config("spark.driver.extraJavaOptions", "-Djava.library.path=J:/Project/trae_projects/Bigdata/Hadoop/bin") \
-    .config("spark.local.dir", "J:/Project/trae_projects/Bigdata/spark-tmp") \
-    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.2") \
-    .config("spark.jars.ivy", "J:/Project/trae_projects/Bigdata/spark-ivy") \
-    .config("spark.sql.streaming.checkpointLocation", "J:/Project/trae_projects/Bigdata/spark-checkpoint") \
+    .config("spark.local.dir", spark_tmp_dir) \
+    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.4") \
+    .config("spark.jars.ivy", ivy_dir) \
+    .config("spark.sql.streaming.checkpointLocation", spark_checkpoint_dir) \
     .getOrCreate()
 spark.sparkContext.setLogLevel("WARN")
 spark.sparkContext.addPyFile(os.path.join(os.path.dirname(__file__), "ai_filter.py"))
@@ -118,7 +122,6 @@ schema = StructType([
     StructField("user_name", StringType()),
     StructField("gender", StringType()),
     StructField("location", StringType()),
-
     StructField("topics", ArrayType(StringType())),
     StructField("mid", StringType()),
     StructField("wb_time", StringType()),

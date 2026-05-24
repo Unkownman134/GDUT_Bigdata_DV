@@ -1,4 +1,4 @@
-pyspark==4.1.2
+pyspark==3.4.4
 scikit-learn==1.7.2
 wordcloud==1.9.4
 Pillow==11.2.1
@@ -11,5 +11,5 @@ requests==2.33.0
 beautifulsoup4==4.14.3
 jieba==0.42.1
 httpx==0.28.1
-numpy==2.4.3
-pandas==3.0.1
+numpy==1.26.4
+pandas==2.2.3

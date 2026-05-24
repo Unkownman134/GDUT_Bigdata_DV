@@ -1,8 +1,8 @@
-﻿# 高考话题实时大数据分析系统
+# 高考话题实时大数据分析系统
 
 **选题：** 基于微博大数据的高考话题实时分析与可视化监控  
 **数据源：** 微博 (Weibo s.weibo.com)  
-**架构：** Kafka 4.3 KRaft → Spark Structured Streaming 4.1 → MySQL 8.0 → Streamlit
+**架构：** Kafka 4.3 KRaft → Spark Structured Streaming 3.4.4 → MySQL 8.0 → Streamlit
 
 ---
 
@@ -10,11 +10,13 @@
 
 | 组件 | 版本 | 用途 |
 |---|---|---|
-| Python | 3.12+ | 爬虫 / Spark / 仪表盘 |
-| Java JDK | 21 | Spark 运行环境 |
+| Python | 3.10 | 爬虫 / Spark / 仪表盘 |
+| Java JDK | 17 | Spark 运行环境 |
 | Kafka | 4.3 (KRaft, 单节点) | 消息队列 |
 | MySQL | 8.0 | 数据存储 |
-| Hadoop winutils | 3.3.5 | Windows Spark 兼容层 |
+| OS | Ubuntu 22.04 | 部署平台 |
+
+**Linux 环境无需 Hadoop winutils，原生支持！**
 
 Python 包（见 `requirements.txt`）：
 ```bash
@@ -44,67 +46,131 @@ gaokao-project/
 └── README.md
 ```
 
-## 快速部署
+## 快速部署（本地虚拟机：Ubuntu 22.04）
 
-### 第一步：复制配置文件
+### 1. 更新系统
+```bash
+sudo apt update && sudo apt upgrade -y
+```
 
-```powershell
-cd J:\Project\trae_projects\Bigdata\gaokao-project
-copy config.example.json config.json
+### 2. 安装 Java 17
+```bash
+sudo apt install -y openjdk-17-jdk
+
+java -version
+```
+
+### 3. 安装 Python 和 pip
+Ubuntu 22.04 通常自带 Python 3.10。
+```bash
+python3 --version
+
+sudo apt install -y python3-pip
+
+pip3 --version
+```
+
+### 4. 安装 MySQL 8.0
+```bash
+sudo apt install -y mysql-server
+
+# 设置 root 密码
+sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'koukiwi'; FLUSH PRIVILEGES;"
+
+# 测试连接
+mysql -u root -p
+```
+
+### 5. 安装 Kafka 4.3
+```bash
+# 下载 Kafka
+wget https://downloads.apache.org/kafka/4.3.0/kafka_2.13-4.3.0.tgz
+
+tar -xzf kafka_2.13-4.3.0.tgz
+
+mkdir -p ~/kafka && mv kafka_2.13-4.3.0/* ~/kafka/
+
+# 格式化 Kafka 存储（首次运行）
+~/kafka/bin/kafka-storage.sh format --standalone -t $(uuidgen) -c ~/kafka/config/server.properties
+
+# 启动 Kafka（在新终端运行）
+~/kafka/bin/kafka-server-start.sh ~/kafka/config/server.properties
+
+# 创建 Kafka 主题
+~/kafka/bin/kafka-topics.sh --create \
+  --topic gaokao_topic \
+  --bootstrap-server localhost:9092 \
+  --partitions 1 \
+  --replication-factor 1
+
+# 查看所有主题
+~/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092
+```
+
+### 6. 克隆项目
+```bash
+sudo apt install -y git
+
+git clone https://github.com/Unkownman135/GDUT_Bigdata_DV.git
+
+cd GDUT_Bigdata_DV/gaokao-project
+```
+
+### 7. 安装 Python 依赖
+```bash
+pip3 install -r requirements.txt
+```
+
+### 8. 配置项目
+```bash
+# 复制配置模板
+cp config.example.json config.json
+
+# 编辑配置
+nano config.json
 ```
 
 编辑 `config.json` 并填入你的凭证：
-- `mysql.password` — MySQL root 密码
-- `weibo_cookie` — 浏览器登录 weibo.com，打开开发者工具 (F12) -> Network -> 复制 Cookie 值
+- `mysql.password` — MySQL root 密码（上面设的 `koukiwi`）
+- `mysql.host` — MySQL 主机地址（默认 `127.0.0.1`）
+- `kafka.bootstrap_servers` — Kafka 地址（默认 `localhost:9092`）
+- `weibo_cookie` — 浏览器登录 weibo.com，打开开发者工具 (F12) → Network → 复制 Cookie 值
 
-### 第二步：安装依赖
+### 9. 初始化数据库
+```bash
+# 创建数据库和表
+mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS gaokao DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
-```powershell
-pip install -r requirements.txt
+python3 -c "import mysql.connector,re,json;cfg=json.load(open('config.json','r',encoding='utf-8'));db=mysql.connector.connect(**cfg['mysql']);c=db.cursor();sql=open('data/init.sql','r',encoding='utf-8').read();sql=re.sub(r'--.*','',sql);[c.execute(s+';') for s in sql.split(';') if s.strip()];db.commit();c.close();db.close();print('数据库初始化完成')"
+
+# 导入高校/专业数据
+python3 data/rebuild_all.py
 ```
 
-### 第三步：初始化数据库与种子数据
+### 10. 启动服务
 
-```powershell
-# 创建数据库和数据表
-python -c "import mysql.connector,re,json;cfg=json.load(open('config.json','r',encoding='utf-8'));db=mysql.connector.connect(**cfg['mysql']);c=db.cursor();sql=open('data/init.sql','r',encoding='utf-8').read();sql=re.sub(r'--.*','',sql);[c.execute(s+';') for s in sql.split(';') if s.strip()];db.commit();c.close();db.close();print('数据库初始化完成')"
-
-# 导入高校/专业种子数据
-python data\rebuild_all.py
+**Spark 服务：**
+```bash
+cd ~/GDUT_Bigdata_DV/gaokao-project
+chmod +x start_spark.sh
+./start_spark.sh
 ```
 
-### 第四步：启动 Kafka
-
-```powershell
-J:\Kafka\kafka_2.13-4.3.0\bin\windows\kafka-server-start.bat `
-  J:\Kafka\kafka_2.13-4.3.0\config\kraft\server.properties
+**爬虫：**
+```bash
+cd ~/GDUT_Bigdata_DV/gaokao-project
+chmod +x start_crawler.sh
+./start_crawler.sh
 ```
 
-### 第五步：启动系统（3 个终端）
-
-**Terminal 1 — Spark Streaming:**
-```powershell
-cd J:\Project\trae_projects\Bigdata\gaokao-project
-$env:HADOOP_HOME="J:\Hadoop"
-$env:PYSPARK_PYTHON="python"
-$env:PYSPARK_DRIVER_PYTHON="python"
-Remove-Item -Recurse -Force "J:\Project\trae_projects\Bigdata\spark-checkpoint" -ErrorAction SilentlyContinue
-python streaming\spark_consumer.py
+**面板：**
+```bash
+cd ~/GDUT_Bigdata_DV/gaokao-project
+chmod +x start_dashboard.sh
+./start_dashboard.sh
 ```
 
-**Terminal 2 — Weibo Crawler:**
-```powershell
-cd J:\Project\trae_projects\Bigdata\gaokao-project
-python crawler\weibo_crawler.py
-```
-
-**Terminal 3 — Dashboard:**
-```powershell
-cd J:\Project\trae_projects\Bigdata\gaokao-project
-streamlit run dashboard\app.py --server.port 8501
-```
-
-浏览器打开 `http://localhost:8501`. 仪表盘每 15 秒自动刷新。
+浏览器打开 `http://<虚拟机IP>:8501`。仪表盘每 15 秒自动刷新。
 
 ## 数据库 (gaokao)
 
@@ -164,8 +230,7 @@ Streamlit 仪表盘
 1. **Cookie 有效期：** 爬虫使用的微博 Cookie 会过期（通常几天到几周），过期后需从浏览器重新导出，更新 `config.json` 中的 `weibo_cookie`
 2. **评论不可获取：** 微博搜索结果显示 `showFeedComment=False`，所有评论API均返回空。帖子正文已足够 NLP 分析
 3. **首次启动 Spark：** 会自动从 Maven 下载 Kafka 连接器 jar（仅一次）
-4. **全部文件在 J 盘：** 不占用 C 盘空间
-5. **Spark checkpoint：** 每次重启建议删除 `spark-checkpoint/` 目录避免偏移量冲突
+4. **Spark checkpoint：** 每次重启建议删除 `spark-checkpoint/` 目录避免偏移量冲突
 
 ## 大作业信息
 

@@ -18,15 +18,13 @@ jieba.cache
 .DS_Store
 Thumbs.db
 
-# Hadoop
-Hadoop/winutils.exe
-Hadoop/hadoop.dll
-
-# Ivy cache and dependencies
+# Spark cache and dependencies
 spark-ivy/cache/
 spark-ivy/jars/
 spark-ivy/*.css
 spark-ivy/*.xsl
+spark-checkpoint/
+spark-tmp/
 
 # Config with secrets
 config.json

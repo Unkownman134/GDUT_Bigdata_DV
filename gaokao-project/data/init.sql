@@ -99,10 +99,3 @@ CREATE TABLE raw_posts (
 
 -- 8. 导入大学/专业种子数据
 -- 运行: python data/rebuild_all.py
-
--- 9. 兼容旧表：给已有 raw_posts 加 gender/location 列
--- 如果已存在会报错，忽略即可
-ALTER TABLE raw_posts ADD COLUMN gender VARCHAR(10) DEFAULT '';
-ALTER TABLE raw_posts ADD COLUMN location VARCHAR(50) DEFAULT '';
-ALTER TABLE raw_posts ADD INDEX idx_loc (location);
-ALTER TABLE raw_posts ADD INDEX idx_gender (gender);
