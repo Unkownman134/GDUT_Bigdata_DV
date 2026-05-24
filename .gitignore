@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+.cache/
+jieba.cache
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Hadoop
+Hadoop/winutils.exe
+Hadoop/hadoop.dll
+
+# Ivy cache and dependencies
+spark-ivy/cache/
+spark-ivy/jars/
+spark-ivy/*.css
+spark-ivy/*.xsl
+
+# Config with secrets
+config.json

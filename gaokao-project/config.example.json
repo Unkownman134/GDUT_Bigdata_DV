@@ -1,0 +1,36 @@
+{
+  "_说明": "高考话题实时分析系统配置 - 复制为 config.json 并填入真实值",
+
+  "mysql": {
+    "host": "localhost",
+    "port": 3306,
+    "user": "root",
+    "password": "你的MySQL密码",
+    "database": "gaokao",
+    "charset": "utf8mb4"
+  },
+
+  "kafka": {
+    "bootstrap_servers": "localhost:9092",
+    "topic": "gaokao_topic"
+  },
+
+  "weibo_cookie": {
+    "SUB": "从浏览器导出替换",
+    "SUBP": "从浏览器导出替换",
+    "WBPSESS": "从浏览器导出替换",
+    "XSRF-TOKEN": "从浏览器导出替换"
+  },
+
+  "crawler": {
+    "keywords": [
+      "高考", "高考志愿", "高考分数线", "高考加油", "高考录取",
+      "高考倒计时", "高考冲刺", "高考复读", "高考报名", "高考改革",
+      "高考必胜", "金榜题名", "高三", "985大学", "志愿填报"
+    ],
+    "pages": 2,
+    "workers": 6,
+    "interval_seconds": 60,
+    "keyword_metrics": {}
+  }
+}
