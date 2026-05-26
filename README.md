@@ -121,6 +121,11 @@ cd GDUT_Bigdata_DV/gaokao-project
 pip3 install -r requirements.txt
 ```
 
+### 7.5 安装中文字体（词云显示用）
+```bash
+sudo apt install -y fonts-wqy-microhei
+```
+
 ### 8. 配置项目
 ```bash
 # 复制配置模板

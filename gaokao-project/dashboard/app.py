@@ -4,12 +4,13 @@ Gaokao Topic Real-time Monitor v5
 聚焦: 帖子正文分析 + 发帖量 + 关键词 + 情感 + 用户分析
 """
 import streamlit as st
+import streamlit.components.v1 as components
 import mysql.connector
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import sys, os, json, re
+import sys, os, json, re, uuid
 
 # 加载配置
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json")
@@ -17,7 +18,7 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as _f:
     CFG = json.load(_f)
 MYSQL = CFG["mysql"]
 
-st.set_page_config(page_title="高考监控中心", layout="wide")
+st.set_page_config(page_title="高考监控中心", layout="wide", initial_sidebar_state="collapsed")
 
 # 全局时间范围选项
 TIME_RANGES = {
@@ -37,179 +38,160 @@ def get_time_condition(hours):
         return "1=1"  # 不限制时间范围
     return f"window_time >= NOW() - INTERVAL {hours} MINUTE"
 
+# ========== 各图表独立数据加载函数 ==========
+
 @st.cache_data(ttl=15)
-def load(time_hours=120, profile_hours=1440):
-    """加载数据，支持时间范围参数"""
+def _load_kpi_health():
+    """加载 KPI 卡片 + 健康检测数据（全局，不按时间筛选）"""
     conn = mysql.connector.connect(**MYSQL)
-    time_cond = get_time_condition(time_hours)
-    profile_cond = get_time_condition(profile_hours)
-    
-    # 帖子统计(按关键词)
-    try:
-        df_v = pd.read_sql(f"SELECT window_time,keyword,video_count FROM video_stats WHERE {time_cond} ORDER BY window_time", conn)
-        if not df_v.empty: 
-            df_v["window_time"] = pd.to_datetime(df_v["window_time"])
-    except: 
-        df_v = pd.DataFrame()
-    
-    # 发帖速率
-    try:
-        df_d = pd.read_sql(f"SELECT window_time,SUM(count) as total FROM danmaku_per_minute WHERE {time_cond} GROUP BY window_time ORDER BY window_time", conn)
-        if not df_d.empty: 
-            df_d["window_time"] = pd.to_datetime(df_d["window_time"])
-    except: 
-        df_d = pd.DataFrame()
-    
-    # 关键词
-    try:
-        df_k = pd.read_sql("SELECT keyword,count FROM keyword_ranking ORDER BY count DESC LIMIT 30", conn)
-    except: 
-        df_k = pd.DataFrame()
-    
-    # 情感
-    try:
-        df_s = pd.read_sql(f"SELECT window_time,positive,neutral,negative FROM sentiment_per_minute WHERE {time_cond} ORDER BY window_time DESC LIMIT 120", conn)
-        if not df_s.empty: 
-            df_s["window_time"] = pd.to_datetime(df_s["window_time"])
-    except: 
-        df_s = pd.DataFrame()
-    
-    # 活跃用户
-    try:
-        df_u = pd.read_sql("SELECT keyword as user_name,rate as post_count FROM engagement_rate WHERE window_time='2026-01-01 00:00:00' ORDER BY rate DESC LIMIT 20", conn)
-    except: 
-        df_u = pd.DataFrame()
-    
-    # 原始帖子
-    try:
-        df_r = pd.read_sql(f"SELECT keyword,user_name,gender,location,sentiment,text_preview,window_time FROM raw_posts WHERE {time_cond} ORDER BY id DESC LIMIT 100", conn)
-        if not df_r.empty: 
-            df_r["window_time"] = pd.to_datetime(df_r["window_time"])
-    except: 
-        df_r = pd.DataFrame()
-    
-    # KPI
     cur = conn.cursor()
     cur.execute("SELECT COALESCE(SUM(video_count),0) FROM video_stats"); total_posts = cur.fetchone()[0]
     cur.execute("SELECT COUNT(DISTINCT keyword) FROM video_stats"); topics = cur.fetchone()[0]
     cur.execute("SELECT COUNT(DISTINCT user_name) FROM raw_posts"); users = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM keyword_ranking WHERE count>0"); akw = cur.fetchone()[0]
+    d_day = (datetime(2026,6,7)-datetime.now()).days
     
-    # ===== 健康检测 =====
     try:
         cur.execute("SELECT MAX(window_time) FROM raw_posts")
         last_post = cur.fetchone()[0]
-    except:
-        last_post = None
+    except: last_post = None
     try:
         cur.execute("SELECT COUNT(*) FROM raw_posts WHERE window_time>=NOW()-INTERVAL 1 MINUTE")
         posts_1m = cur.fetchone()[0]
-    except:
-        posts_1m = 0
-    
-    # 各关键词最近5分钟帖子数
+    except: posts_1m = 0
     try:
-        cur.execute("""
-            SELECT keyword, COUNT(*) as cnt
-            FROM raw_posts
-            WHERE window_time >= NOW()-INTERVAL 5 MINUTE
-            GROUP BY keyword ORDER BY cnt DESC
-        """)
+        cur.execute("SELECT keyword, COUNT(*) as cnt FROM raw_posts WHERE window_time >= NOW()-INTERVAL 5 MINUTE GROUP BY keyword ORDER BY cnt DESC")
         kw_health = cur.fetchall()
-    except:
-        kw_health = []
-    
-    # 各图表数据量
-    try:
-        cur.execute(f"SELECT COUNT(*) FROM video_stats WHERE {time_cond}")
-        chart_v_rows = cur.fetchone()[0]
-    except:
-        chart_v_rows = 0
-    try:
-        cur.execute("SELECT COUNT(*) FROM keyword_ranking WHERE count>0")
-        chart_k_rows = cur.fetchone()[0]
-    except:
-        chart_k_rows = 0
-    try:
-        cur.execute("SELECT COUNT(*) FROM sentiment_per_minute")
-        chart_s_rows = cur.fetchone()[0]
-    except:
-        chart_s_rows = 0
+    except: kw_health = []
     try:
         cur.execute("SELECT COUNT(*) FROM raw_posts")
         total_raw = cur.fetchone()[0]
-    except:
-        total_raw = 0
+    except: total_raw = 0
     
-    # ===== 总量情感（从 raw_posts 累计） =====
+    # 关键词总量
     try:
-        df_st = pd.read_sql(
-            f"SELECT sentiment, COUNT(*) as cnt FROM raw_posts "
-            f"WHERE sentiment IN ('positive','neutral','negative') AND {time_cond} "
-            "GROUP BY sentiment", conn)
-    except:
-        df_st = pd.DataFrame()
-    
-    # ===== 用户画像 - 总量 =====
-    try:
-        df_gender = pd.read_sql(
-            f"SELECT gender, COUNT(*) as cnt FROM raw_posts "
-            f"WHERE gender IN ('m','f') AND {profile_cond} GROUP BY gender", conn)
-    except:
-        df_gender = pd.DataFrame()
-    try:
-        df_loc_tot = pd.read_sql(
-            f"SELECT location, COUNT(*) as cnt FROM raw_posts "
-            f"WHERE location!='' AND location NOT IN ('其他','其它') AND {profile_cond} "
-            "GROUP BY location ORDER BY cnt DESC LIMIT 20", conn)
-    except:
-        df_loc_tot = pd.DataFrame()
-    try:
-        df_user_tot = pd.read_sql(
-            f"SELECT user_name, COUNT(*) as cnt FROM raw_posts "
-            f"WHERE user_name!='' AND user_name!='?' AND {profile_cond} "
-            "GROUP BY user_name ORDER BY cnt DESC LIMIT 15", conn)
-    except:
-        df_user_tot = pd.DataFrame()
-    
-    # ===== 关键词增长趋势 =====
-    try:
-        df_kw_trend = pd.read_sql(
-            f"SELECT window_time, SUM(video_count) as cumulative "
-            f"FROM video_stats WHERE {time_cond} GROUP BY window_time ORDER BY window_time",
-            conn)
-        if not df_kw_trend.empty:
-            df_kw_trend["window_time"] = pd.to_datetime(df_kw_trend["window_time"])
-            df_kw_trend["cumulative"] = df_kw_trend["cumulative"].cumsum()
-    except:
-        df_kw_trend = pd.DataFrame()
-    
-    # ===== 帖子长度分布 =====
-    try:
-        df_len_tot = pd.read_sql(
-            f"SELECT LENGTH(text_preview) as text_len FROM raw_posts "
-            f"WHERE LENGTH(text_preview) BETWEEN 1 AND 300 AND {time_cond} "
-            "ORDER BY id DESC LIMIT 2000", conn)
-    except:
-        df_len_tot = pd.DataFrame()
-    
-    # ===== 情感×关键词热力 =====
-    try:
-        df_heat_tot = pd.read_sql(
-            f"SELECT keyword, sentiment, COUNT(*) as cnt FROM raw_posts "
-            f"WHERE sentiment IN ('positive','neutral','negative') AND {time_cond} "
-            "AND keyword IN (SELECT keyword FROM keyword_ranking ORDER BY count DESC LIMIT 10) "
-            "GROUP BY keyword, sentiment", conn)
-    except:
-        df_heat_tot = pd.DataFrame()
+        df_k = pd.read_sql("SELECT keyword,count FROM keyword_ranking ORDER BY count DESC LIMIT 30", conn)
+    except: df_k = pd.DataFrame()
     
     conn.close()
-    d_day = (datetime(2026,6,7)-datetime.now()).days
-    return (df_v,df_d,df_k,df_s,df_u,df_r,df_st,df_kw_trend,
-            df_gender,df_loc_tot,df_user_tot,df_len_tot,df_heat_tot,
-            total_posts,topics,users,akw,d_day,
-            last_post,posts_1m,kw_health,
-            chart_v_rows,chart_k_rows,chart_s_rows,total_raw)
+    return total_posts, topics, users, akw, d_day, last_post, posts_1m, kw_health, total_raw, df_k
+
+@st.cache_data(ttl=15)
+def _query_video_stats(time_hours):
+    """热度趋势数据"""
+    conn = mysql.connector.connect(**MYSQL)
+    time_cond = get_time_condition(time_hours)
+    try:
+        df = pd.read_sql(f"SELECT window_time,keyword,video_count FROM video_stats WHERE {time_cond} ORDER BY window_time", conn)
+        if not df.empty: df["window_time"] = pd.to_datetime(df["window_time"])
+    except: df = pd.DataFrame()
+    conn.close()
+    return df
+
+@st.cache_data(ttl=15)
+def _query_danmaku(time_hours):
+    """实时速率数据"""
+    conn = mysql.connector.connect(**MYSQL)
+    time_cond = get_time_condition(time_hours)
+    try:
+        df = pd.read_sql(f"SELECT window_time,SUM(count) as total FROM danmaku_per_minute WHERE {time_cond} GROUP BY window_time ORDER BY window_time", conn)
+        if not df.empty: df["window_time"] = pd.to_datetime(df["window_time"])
+    except: df = pd.DataFrame()
+    conn.close()
+    return df
+
+@st.cache_data(ttl=15)
+def _query_sentiment_ts(time_hours):
+    """情感时序数据"""
+    conn = mysql.connector.connect(**MYSQL)
+    time_cond = get_time_condition(time_hours)
+    try:
+        df = pd.read_sql(f"SELECT window_time,positive,neutral,negative FROM sentiment_per_minute WHERE {time_cond} ORDER BY window_time DESC LIMIT 120", conn)
+        if not df.empty: df["window_time"] = pd.to_datetime(df["window_time"])
+    except: df = pd.DataFrame()
+    conn.close()
+    return df
+
+@st.cache_data(ttl=15)
+def _query_sentiment_pie(time_hours):
+    """情感分布饼图数据（用于无选择器的情感仪表+分布）"""
+    conn = mysql.connector.connect(**MYSQL)
+    time_cond = get_time_condition(time_hours)
+    try:
+        df = pd.read_sql(f"SELECT sentiment, COUNT(*) as cnt FROM raw_posts WHERE sentiment IN ('positive','neutral','negative') AND {time_cond} GROUP BY sentiment", conn)
+    except: df = pd.DataFrame()
+    conn.close()
+    return df
+
+@st.cache_data(ttl=15)
+def _query_latest_posts(time_hours):
+    """最新帖子数据"""
+    conn = mysql.connector.connect(**MYSQL)
+    time_cond = get_time_condition(time_hours)
+    try:
+        df = pd.read_sql(f"SELECT keyword,user_name,gender,location,sentiment,text_preview,window_time FROM raw_posts WHERE {time_cond} ORDER BY id DESC LIMIT 100", conn)
+        if not df.empty: df["window_time"] = pd.to_datetime(df["window_time"])
+    except: df = pd.DataFrame()
+    conn.close()
+    return df
+
+@st.cache_data(ttl=15)
+def _query_profile(time_hours):
+    """用户画像数据（性别+地区+活跃用户）"""
+    conn = mysql.connector.connect(**MYSQL)
+    time_cond = get_time_condition(time_hours)
+    try:
+        df_gender = pd.read_sql(f"SELECT gender, COUNT(*) as cnt FROM raw_posts WHERE gender IN ('m','f') AND {time_cond} GROUP BY gender", conn)
+    except: df_gender = pd.DataFrame()
+    try:
+        df_loc = pd.read_sql(f"SELECT location, COUNT(*) as cnt FROM raw_posts WHERE location!='' AND location NOT IN ('其他','其它') AND {time_cond} GROUP BY location ORDER BY cnt DESC LIMIT 20", conn)
+    except: df_loc = pd.DataFrame()
+    try:
+        df_user = pd.read_sql(f"SELECT user_name, COUNT(*) as cnt FROM raw_posts WHERE user_name!='' AND user_name!='?' AND {time_cond} GROUP BY user_name ORDER BY cnt DESC LIMIT 15", conn)
+    except: df_user = pd.DataFrame()
+    conn.close()
+    return df_gender, df_loc, df_user
+
+@st.cache_data(ttl=15)
+def _query_cross_analysis(time_hours):
+    """深度交叉分析数据（帖子长度+情感热力图+关键词趋势）"""
+    conn = mysql.connector.connect(**MYSQL)
+    time_cond = get_time_condition(time_hours)
+    try:
+        df_len = pd.read_sql(f"SELECT LENGTH(text_preview) as text_len FROM raw_posts WHERE LENGTH(text_preview) BETWEEN 1 AND 300 AND {time_cond} ORDER BY id DESC LIMIT 2000", conn)
+    except: df_len = pd.DataFrame()
+    try:
+        df_heat = pd.read_sql(f"SELECT r.keyword, r.sentiment, COUNT(*) as cnt FROM raw_posts r INNER JOIN (SELECT keyword FROM keyword_ranking ORDER BY count DESC LIMIT 10) k ON r.keyword = k.keyword WHERE r.sentiment IN ('positive','neutral','negative') AND {time_cond} GROUP BY r.keyword, r.sentiment", conn)
+    except: df_heat = pd.DataFrame()
+    try:
+        df_trend = pd.read_sql(f"SELECT window_time, SUM(video_count) as cumulative FROM video_stats WHERE {time_cond} GROUP BY window_time ORDER BY window_time", conn)
+        if not df_trend.empty:
+            df_trend["window_time"] = pd.to_datetime(df_trend["window_time"])
+            df_trend["cumulative"] = df_trend["cumulative"].cumsum()
+    except: df_trend = pd.DataFrame()
+    conn.close()
+    return df_len, df_heat, df_trend
+
+@st.cache_data(ttl=15)
+def _query_more_analysis(time_hours):
+    """更多分析维度数据（地域x情感+性别x情感+时段分布）"""
+    conn = mysql.connector.connect(**MYSQL)
+    time_cond = get_time_condition(time_hours)
+    try:
+        df = pd.read_sql(f"SELECT keyword,user_name,gender,location,sentiment,text_preview,window_time FROM raw_posts WHERE {time_cond} ORDER BY id DESC LIMIT 500", conn)
+        if not df.empty: df["window_time"] = pd.to_datetime(df["window_time"])
+    except: df = pd.DataFrame()
+    conn.close()
+    return df
+
+@st.cache_data(ttl=15)
+def _query_hourly_dist(time_hours):
+    """小时发帖分布"""
+    df = _query_video_stats(time_hours)
+    if not df.empty:
+        df["hour"] = df["window_time"].dt.hour
+        df = df.groupby("hour")["video_count"].sum().reset_index()
+    return df
 
 def clean_text(text):
     """清理文本中的 emoji 和特殊字符"""
@@ -249,6 +231,8 @@ def load_wordcloud(time_hours=120):
     
     conn = mysql.connector.connect(**MYSQL)
     time_cond = get_time_condition(time_hours)
+    # keyword_ranking 表使用 update_time 而非 window_time
+    time_cond = time_cond.replace("window_time", "update_time")
     
     try:
         df = pd.read_sql(
@@ -354,78 +338,156 @@ def load_topics(time_hours=120):
 
     return topic_counts, topic_samples
 
+# ========== 访客追踪 ==========
+def _init_visitor():
+    """初始化访客追踪，返回 (页面访问次数, 当前在线)"""
+    conn = mysql.connector.connect(**MYSQL)
+    cur = conn.cursor()
+    # 总访问计数器（单行累计）
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS visitor_count (
+            id INT PRIMARY KEY DEFAULT 1,
+            total INT DEFAULT 0
+        )
+    """)
+    # 在线会话表
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS visitor_sessions (
+            id VARCHAR(64) PRIMARY KEY,
+            last_seen DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    
+    # 新会话 → 总计数 +1
+    if "visitor_done" not in st.session_state:
+        st.session_state.visitor_done = True
+        cur.execute("INSERT INTO visitor_count (id, total) VALUES (1, 1) ON DUPLICATE KEY UPDATE total = total + 1")
+        conn.commit()
+    
+    # 会话心跳
+    if "visitor_sid" not in st.session_state:
+        st.session_state.visitor_sid = str(uuid.uuid4())
+        try:
+            cur.execute("INSERT INTO visitor_sessions (id) VALUES (%s)", (st.session_state.visitor_sid,))
+            conn.commit()
+        except:
+            pass
+    
+    # 读取统计
+    cur.execute("SELECT total FROM visitor_count WHERE id = 1")
+    row = cur.fetchone()
+    total = row[0] if row else 0
+    # 1分钟内有心跳的算在线，避免刷新后旧会话残留
+    cur.execute("SELECT COUNT(*) FROM visitor_sessions WHERE last_seen >= NOW() - INTERVAL 1 MINUTE")
+    online = cur.fetchone()[0]
+    conn.close()
+    return total, online
+
+# ========== 关键词共现网络 ==========
+@st.cache_data(ttl=30)
+def load_keyword_network():
+    """关键词共现网络：统计 TOP20 关键词在同一条帖子中出现的次数"""
+    import networkx as nx
+    from collections import defaultdict
+    import itertools
+    
+    conn = mysql.connector.connect(**MYSQL)
+    try:
+        top_kw = pd.read_sql("SELECT keyword FROM keyword_ranking ORDER BY count DESC LIMIT 20", conn)
+        keywords = top_kw["keyword"].tolist()
+    except:
+        keywords = []
+    try:
+        df = pd.read_sql("SELECT text_preview FROM raw_posts ORDER BY id DESC LIMIT 500", conn)
+    except:
+        df = pd.DataFrame()
+    conn.close()
+    
+    if not keywords or df.empty:
+        return None, None, None
+    
+    # 统计共现次数
+    co_occur = defaultdict(float)
+    kw_set = set(keywords)
+    for text in df["text_preview"].dropna():
+        found = [kw for kw in keywords if kw in str(text)]
+        for a, b in itertools.combinations(found, 2):
+            k1, k2 = (a, b) if a < b else (b, a)
+            co_occur[(k1, k2)] += 1
+    
+    if not co_occur:
+        return None, None, None
+    
+    # 构建图
+    G = nx.Graph()
+    max_w = max(co_occur.values())
+    # 过滤弱关联（只保留共现 >= 2 次或共现次数达到最大值的 20% 以上）
+    threshold = max(2, int(max_w * 0.2))
+    for (kw1, kw2), w in co_occur.items():
+        if w >= threshold:
+            G.add_edge(kw1, kw2, weight=w)
+    
+    # 节点大小 = 关键词热度
+    conn2 = mysql.connector.connect(**MYSQL)
+    try:
+        kw_counts = pd.read_sql("SELECT keyword, count FROM keyword_ranking WHERE keyword IN ({})".format(
+            ','.join(["'"+k+"'" for k in keywords])), conn2)
+        count_dict = dict(zip(kw_counts["keyword"], kw_counts["count"]))
+    except:
+        count_dict = {}
+    conn2.close()
+    
+    return G, keywords, count_dict
+
 def main():
-    st.markdown("""<style>
-    .stApp{background:#0d1117}.metric-card{background:linear-gradient(135deg,#1a1a2e,#16213e);border-radius:12px;padding:16px;text-align:center;border:1px solid #2a2a4a}
-    .metric-value{font-size:2em;font-weight:bold;color:#ff6b35}.metric-label{font-size:.8em;color:#8b8b9e;margin-top:4px}
-    .header{text-align:center;padding:5px}.header h1{color:#e0e0e0;font-size:1.6em;margin:0}
-    .status{background:#1a1a2e;border-radius:8px;padding:6px 20px;text-align:center;color:#aaa;border:1px solid #2a2a4a;margin-bottom:10px}
+    # ===== 主题系统 =====
+    THEMES = {
+        "深空黑": {
+            "bg": "#0d1117", "card_bg": "linear-gradient(135deg,#1a1a2e,#16213e)",
+            "card_border": "#2a2a4a", "text": "#e0e0e0", "text2": "#aaa",
+            "accent": "#ff6b35", "label": "#8b8b9e",
+        },
+        "极光蓝": {
+            "bg": "#0a1628", "card_bg": "linear-gradient(135deg,#0f2647,#1a365d)",
+            "card_border": "#2a4a7a", "text": "#d0e0f0", "text2": "#8ab4f8",
+            "accent": "#42a5f5", "label": "#78909c",
+        },
+        "烈焰橙": {
+            "bg": "#1a0f0a", "card_bg": "linear-gradient(135deg,#2a1a0f,#3d2212)",
+            "card_border": "#5a3520", "text": "#f0e0d0", "text2": "#d4a574",
+            "accent": "#ff8a3d", "label": "#9e7a5a",
+        },
+        "薄荷绿": {
+            "bg": "#0a1a12", "card_bg": "linear-gradient(135deg,#0f2a1e,#1a3d2e)",
+            "card_border": "#2a5a40", "text": "#d0f0e0", "text2": "#80c0a0",
+            "accent": "#4caf50", "label": "#6a9e7a",
+        },
+
+    }
+    _theme_name = st.sidebar.selectbox("主题", list(THEMES.keys()), index=0, key="theme_selector")
+    T = THEMES[_theme_name]
+    _fc = "#ccc"  # 图表字体颜色
+    
+    # 字体颜色随主题
+    _tc = T["text"]
+    _tc_header = _tc
+    _tc_status = _tc
+    _st_info_color = _tc
+    
+    st.markdown(f"""<style>
+    .stApp{{background:{T["bg"]}}}.metric-card{{background:{T["card_bg"]};border-radius:12px;padding:16px;text-align:center;border:1px solid {T["card_border"]}}}
+    .metric-value{{font-size:2em;font-weight:bold;color:{T["accent"]}}}.metric-label{{font-size:.8em;color:{T["label"]};margin-top:4px}}
+    .header{{text-align:center;padding:5px}}.header h1{{color:{_tc_header};font-size:1.6em;margin:0}}
+    .status{{background:{T["card_bg"]};border-radius:8px;padding:6px 20px;text-align:center;color:{_tc_status};border:1px solid {T["card_border"]};margin-bottom:10px}}
+    .stSelectbox label, .stButton button, .stMarkdown, .stSubheader, .stText, .stCaption, .stDataFrame, .stExpander, .stInfo, .stWrite {{color:{_tc} !important}}
+    .st-bx {{background:{T["bg"]}}}
+    .st-cx {{background:{T["bg"]}}}
+    .st-da {{background:{T["bg"]}}}
     </style>""", unsafe_allow_html=True)
 
-    # ===== 独立时间范围选择器 =====
-    st.sidebar.subheader("时间范围配置")
-    
-    time_range_trend = st.sidebar.selectbox(
-        "热度趋势", 
-        options=list(TIME_RANGES.keys()), 
-        index=3,  # 默认2小时
-        key="trend_time"
-    )
-    
-    time_range_rate = st.sidebar.selectbox(
-        "实时速率", 
-        options=list(TIME_RANGES.keys()), 
-        index=2,  # 默认1小时
-        key="rate_time"
-    )
-    
-    time_range_cross = st.sidebar.selectbox(
-        "交叉分析", 
-        options=list(TIME_RANGES.keys()), 
-        index=3,  # 默认2小时
-        key="cross_time"
-    )
-    
-    time_range_wordcloud = st.sidebar.selectbox(
-        "词云", 
-        options=list(TIME_RANGES.keys()), 
-        index=5,  # 默认12小时
-        key="wordcloud_time"
-    )
-    
-    # 更多分析维度的时间范围选择器
-    time_range_profile = st.sidebar.selectbox(
-        "用户画像", 
-        options=list(TIME_RANGES.keys()), 
-        index=6,  # 默认24小时
-        key="profile_time"
-    )
-    
-    time_range_topic = st.sidebar.selectbox(
-        "话题聚类", 
-        options=list(TIME_RANGES.keys()), 
-        index=5,  # 默认12小时
-        key="topic_time"
-    )
-    
-    time_range_sentiment = st.sidebar.selectbox(
-        "情感分析", 
-        options=list(TIME_RANGES.keys()), 
-        index=3,  # 默认2小时
-        key="sentiment_time"
-    )
-    
-    # 加载数据（使用交叉分析的时间范围作为主时间范围）
-    main_time = TIME_RANGES[time_range_cross]
-    profile_time = TIME_RANGES[time_range_profile]
-    topic_time = TIME_RANGES[time_range_topic]
-    sentiment_time = TIME_RANGES[time_range_sentiment]
-    
-    (df_v,df_d,df_k,df_s,df_u,df_r,df_st,df_kw_trend,
-     df_gender,df_loc_tot,df_user_tot,df_len_tot,df_heat_tot,
-     total_posts,topics,users,akw,d_day,
-     last_post,posts_1m,kw_health,
-     chart_v_rows,chart_k_rows,chart_s_rows,total_raw) = load(main_time, profile_time)
+    # 加载 KPI + 健康检测 + 关键词总量（全局数据，无时间筛选）
+    total_posts, topics, users, akw, d_day, last_post, posts_1m, kw_health, total_raw, df_k = _load_kpi_health()
     
     now = datetime.now().strftime("%H:%M:%S")
     st.markdown(f'<div class="header"><h1>高考话题实时监控中心</h1></div>', unsafe_allow_html=True)
@@ -462,15 +524,9 @@ def main():
                 st.info("暂无数据")
         with hc2:
             st.markdown("**图表数据量校验**")
-            checks = [
-                ("热度趋势", chart_v_rows, 1, "video_stats"),
-                ("关键词排行", chart_k_rows, 1, "keyword_ranking"),
-                ("情感总量", len(df_st), 1, "raw_posts(sentiment)"),
-                ("原始帖子", total_raw, 1, "raw_posts"),
-            ]
-            for name, count, _, table in checks:
-                icon = "正常" if count > 0 else "无数据"
-                st.markdown(f"{icon} **{name}**: {count} 行 (`{table}`)")
+            st.write(f"· 热度趋势: {total_raw} 条 (video_stats)")
+            st.write(f"· 关键词排行: {len(df_k)} 个 (keyword_ranking)")
+            st.write(f"· 原始帖子: {total_raw} 条 (raw_posts)")
             st.caption("数据量为 0 表示该组件尚未产出数据，请检查对应服务")
 
     # KPI
@@ -482,126 +538,7 @@ def main():
     c5.markdown(f'<div class="metric-card"><div class="metric-value">{d_day}</div><div class="metric-label">距高考(天)</div></div>', unsafe_allow_html=True)
     st.markdown("---")
 
-    # 第一行: 热度趋势 + 实时速率
-    r1c1,r1c2 = st.columns(2)
-    with r1c1:
-        st.subheader(f"话题热度趋势（{time_range_trend}）")
-        if not df_v.empty:
-            dv = df_v.groupby(["window_time","keyword"])["video_count"].sum().reset_index().sort_values("window_time")
-            top_kws = dv.groupby("keyword")["video_count"].sum().nlargest(8).index.tolist()
-            dv = dv[dv["keyword"].isin(top_kws)]
-            dv = dv.tail(300)
-            fig = px.line(dv, x="window_time", y="video_count", color="keyword", labels={"video_count":"帖子数"})
-            fig.update_layout(height=300,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color="#ccc",legend=dict(orientation="h",y=1.15),margin=dict(l=10,r=10,t=10,b=10))
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(f"显示 TOP8 + 其他 · total {df_v['keyword'].nunique()} 个关键词")
-        else: 
-            st.info("等待数据...")
-    
-    with r1c2:
-        st.subheader(f"帖子实时速率（{time_range_rate}）")
-        if not df_d.empty:
-            fig = px.bar(df_d.sort_values("window_time").tail(100), x="window_time", y="total", labels={"total":"帖/分钟"})
-            fig.update_traces(marker_color="#ff6b35")
-            fig.update_layout(height=300,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color="#ccc",margin=dict(l=10,r=10,t=10,b=10))
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(f"{len(df_d)} 个时间窗口")
-        else: 
-            st.info("等待数据...")
-    st.markdown("---")
-
-    # 第二行: 关键词占比 + TOP20 + 情感饼图
-    r2c1,r2c2,r2c3 = st.columns([2,2,1.5])
-    with r2c1:
-        st.subheader("话题占比树图")
-        if not df_k.empty:
-            fig = px.treemap(df_k.head(20), path=["keyword"], values="count", color="count", color_continuous_scale="OrRd")
-            fig.update_layout(height=350,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color="#ccc",margin=dict(l=10,r=10,t=10,b=10))
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(f"TOP20 keywords · total {df_k['count'].sum():,} 次")
-        else: 
-            st.info("等待数据...")
-    
-    with r2c2:
-        st.subheader("关键词 TOP20")
-        if not df_k.empty:
-            dk = df_k.head(20).iloc[::-1]
-            fig = px.bar(dk, y="keyword", x="count", orientation="h", color="count", color_continuous_scale="Blues", labels={"count":"出现次数"})
-            fig.update_layout(height=350,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color="#ccc",showlegend=False,margin=dict(l=10,r=10,t=10,b=10))
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(f"{len(dk)} 个关键词 · 从 {dk['count'].min()} 到 {dk['count'].max()} 次")
-        else: 
-            st.info("等待数据...")
-    
-    with r2c3:
-        st.subheader(f"情感仪表（{time_range_sentiment}）")
-        if not df_st.empty:
-            def _g(s):
-                r = df_st[df_st["sentiment"]==s]
-                return int(r["cnt"].values[0]) if not r.empty else 0
-            pos, neu, neg = _g("positive"), _g("neutral"), _g("negative")
-            total = pos + neu + neg
-            fig = go.Figure(go.Indicator(mode="gauge+number+delta", value=pos,
-                delta={"reference":neg,"decreasing":{"color":"#F44336"}},
-                title={"text":"Positive vs Negative"},
-                gauge={"axis":{"range":[0,max(total,10)]},"bar":{"color":"#4CAF50"},
-                       "steps":[{"range":[0,neu],"color":"#FFC107"}]}))
-            fig.update_layout(height=350,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color="#ccc")
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(f"Cumulative · 正{pos} 中{neu} 负{neg}")
-        else: 
-            st.info("等待数据...")
-
-    # 第三行: 情感时序 + 小时分布 + 帖子长度
-    r3c1,r3c2,r3c3 = st.columns(3)
-    with r3c1:
-        st.subheader(f"情感分布（{time_range_sentiment}）")
-        if not df_st.empty:
-            def _g(s):
-                r = df_st[df_st["sentiment"]==s]
-                return int(r["cnt"].values[0]) if not r.empty else 0
-            pos, neu, neg = _g("positive"), _g("neutral"), _g("negative")
-            fig = go.Figure(go.Pie(labels=["Positive","Neutral","Negative"],
-                values=[pos, neu, neg],
-                marker_colors=["#4CAF50","#FFC107","#F44336"],hole=0.5,textinfo="label+percent"))
-            fig.update_layout(height=280,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color="#ccc",showlegend=False,margin=dict(l=10,r=10,t=10,b=10))
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(f"累计: 正面{pos} 中{neu} 负{neg}")
-        else: 
-            st.info("等待数据...")
-    
-    with r3c2:
-        st.subheader("情感时序河流图")
-        if not df_s.empty:
-            ds = df_s.sort_values("window_time")
-            fig = go.Figure()
-            for cl,nm,co in [("positive","Positive","#4CAF50"),("neutral","Neutral","#FFC107"),("negative","Negative","#F44336")]:
-                fig.add_trace(go.Scatter(x=ds["window_time"],y=ds[cl],mode="lines",name=nm,line=dict(color=co,width=2),stackgroup="one"))
-            fig.update_layout(height=280,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color="#ccc",legend=dict(orientation="h",y=1.15),margin=dict(l=10,r=10,t=10,b=10))
-            st.plotly_chart(fig, use_container_width=True)
-            if not ds.empty:
-                st.caption(f"{len(ds)} 个时间窗口 · 覆盖 {ds['window_time'].min().strftime('%H:%M')}~{ds['window_time'].max().strftime('%H:%M')}")
-            else:
-                st.caption(f"{len(ds)} 个时间窗口")
-        else: 
-            st.info("等待数据...")
-    
-    with r3c3:
-        st.subheader("小时发帖分布")
-        if not df_v.empty:
-            df_v["hour"] = df_v["window_time"].dt.hour
-            hourly = df_v.groupby("hour")["video_count"].sum().reset_index()
-            fig = px.bar(hourly, x="hour", y="video_count", labels={"hour":"小时","video_count":"帖子数"})
-            fig.update_traces(marker_color="#2196F3")
-            fig.update_layout(height=280,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color="#ccc",margin=dict(l=10,r=10,t=10,b=10))
-            fig.update_xaxes(dtick=2)
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(f"{len(hourly)} 个时段 · 峰值 {int(hourly['video_count'].max())} 条")
-        else: 
-            st.info("等待数据...")
-    st.markdown("---")
-
-    # ===== 系统状态 =====
+    # ===== 系统配置 =====
     st.subheader("系统配置")
     sc1, sc2, sc3, sc4 = st.columns(4)
     with sc1:
@@ -615,8 +552,145 @@ def main():
 
     st.markdown("---")
 
-    # 第四行: 用户画像
-    st.subheader(f"用户画像分析（{time_range_profile}）")
+    # ===== 立即刷新按钮 =====
+    if st.button("🔄 立即刷新"):
+        st.cache_data.clear()
+        st.rerun()
+
+    # ===== 第一行: 热度趋势 + 实时速率 =====
+    r1c1,r1c2 = st.columns(2)
+    with r1c1:
+        col1, col2 = st.columns([3, 1])
+        with col1: st.subheader("话题热度趋势")
+        with col2: _t_trend = st.selectbox("时间", list(TIME_RANGES.keys()), index=3, key="trend_time", label_visibility="collapsed")
+        df_v = _query_video_stats(TIME_RANGES[_t_trend])
+        if not df_v.empty:
+            dv = df_v.groupby(["window_time","keyword"])["video_count"].sum().reset_index().sort_values("window_time")
+            top_kws = dv.groupby("keyword")["video_count"].sum().nlargest(8).index.tolist()
+            dv = dv[dv["keyword"].isin(top_kws)]
+            dv = dv.tail(300)
+            fig = px.line(dv, x="window_time", y="video_count", color="keyword", labels={"video_count":"帖子数"})
+            fig.update_layout(height=300,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color=_fc,legend=dict(orientation="h",y=1.15),margin=dict(l=10,r=10,t=10,b=10))
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(f"显示 TOP8 + 其他 · total {df_v['keyword'].nunique()} 个关键词")
+        else: 
+            st.info("等待数据...")
+    
+    with r1c2:
+        col1, col2 = st.columns([3, 1])
+        with col1: st.subheader("帖子实时速率")
+        with col2: _t_rate = st.selectbox("时间", list(TIME_RANGES.keys()), index=2, key="rate_time", label_visibility="collapsed")
+        df_d = _query_danmaku(TIME_RANGES[_t_rate])
+        if not df_d.empty:
+            fig = px.bar(df_d.sort_values("window_time").tail(100), x="window_time", y="total", labels={"total":"帖/分钟"})
+            fig.update_traces(marker_color="#ff6b35")
+            fig.update_layout(height=300,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color=_fc,margin=dict(l=10,r=10,t=10,b=10))
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(f"{len(df_d)} 个时间窗口")
+        else: 
+            st.info("等待数据...")
+    st.markdown("---")
+
+    # ===== 第二行: 关键词占比 + TOP20 + 情感仪表（无时间选择器） =====
+    df_st_pie = _query_sentiment_pie(0)  # 情感仪表+分布使用"所有"
+    r2c1,r2c2,r2c3 = st.columns([2,2,1.5])
+    with r2c1:
+        st.subheader("话题占比树图")
+        if not df_k.empty:
+            fig = px.treemap(df_k.head(20), path=["keyword"], values="count", color="count", color_continuous_scale="OrRd")
+            fig.update_layout(height=350,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color=_fc,margin=dict(l=10,r=10,t=10,b=10))
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(f"TOP20 keywords · total {df_k['count'].sum():,} 次")
+        else: 
+            st.info("等待数据...")
+    
+    with r2c2:
+        st.subheader("关键词 TOP20")
+        if not df_k.empty:
+            dk = df_k.head(20).iloc[::-1]
+            fig = px.bar(dk, y="keyword", x="count", orientation="h", color="count", color_continuous_scale="Blues", labels={"count":"出现次数"})
+            fig.update_layout(height=350,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color=_fc,showlegend=False,margin=dict(l=10,r=10,t=10,b=10))
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(f"{len(dk)} 个关键词 · 从 {dk['count'].min()} 到 {dk['count'].max()} 次")
+        else: 
+            st.info("等待数据...")
+    
+    with r2c3:
+        st.subheader("情感仪表")
+        if not df_st_pie.empty:
+            def _g(s):
+                r = df_st_pie[df_st_pie["sentiment"]==s]
+                return int(r["cnt"].values[0]) if not r.empty else 0
+            pos, neu, neg = _g("positive"), _g("neutral"), _g("negative")
+            total = pos + neu + neg
+            fig = go.Figure(go.Indicator(mode="gauge+number+delta", value=pos,
+                delta={"reference":neg,"decreasing":{"color":"#F44336"}},
+                title={"text":"Positive vs Negative"},
+                gauge={"axis":{"range":[0,max(total,10)]},"bar":{"color":"#4CAF50"},
+                       "steps":[{"range":[0,neu],"color":"#FFC107"}]}))
+            fig.update_layout(height=350,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color=_fc)
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(f"Cumulative · 正{pos} 中{neu} 负{neg}")
+        else: 
+            st.info("等待数据...")
+
+    # ===== 第三行: 情感分布（无时间选择器）+ 情感时序河流图 + 小时发帖分布 =====
+    r3c1,r3c2,r3c3 = st.columns(3)
+    with r3c1:
+        st.subheader("情感分布")
+        if not df_st_pie.empty:
+            def _g(s):
+                r = df_st_pie[df_st_pie["sentiment"]==s]
+                return int(r["cnt"].values[0]) if not r.empty else 0
+            pos, neu, neg = _g("positive"), _g("neutral"), _g("negative")
+            fig = go.Figure(go.Pie(labels=["Positive","Neutral","Negative"],
+                values=[pos, neu, neg],
+                marker_colors=["#4CAF50","#FFC107","#F44336"],hole=0.5,textinfo="label+percent"))
+            fig.update_layout(height=280,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color=_fc,showlegend=False,margin=dict(l=10,r=10,t=10,b=10))
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(f"累计: 正面{pos} 中{neu} 负{neg}")
+        else: 
+            st.info("等待数据...")
+    
+    with r3c2:
+        col1, col2 = st.columns([3, 1])
+        with col1: st.subheader("情感时序河流图")
+        with col2: _t_sent = st.selectbox("时间", list(TIME_RANGES.keys()), index=3, key="sentiment_time", label_visibility="collapsed")
+        df_s = _query_sentiment_ts(TIME_RANGES[_t_sent])
+        if not df_s.empty:
+            ds = df_s.sort_values("window_time")
+            fig = go.Figure()
+            for cl,nm,co in [("positive","Positive","#4CAF50"),("neutral","Neutral","#FFC107"),("negative","Negative","#F44336")]:
+                fig.add_trace(go.Scatter(x=ds["window_time"],y=ds[cl],mode="lines",name=nm,line=dict(color=co,width=2),stackgroup="one"))
+            fig.update_layout(height=280,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color=_fc,legend=dict(orientation="h",y=1.15),margin=dict(l=10,r=10,t=10,b=10))
+            st.plotly_chart(fig, use_container_width=True)
+            if not ds.empty:
+                st.caption(f"{len(ds)} 个时间窗口 · 覆盖 {ds['window_time'].min().strftime('%H:%M')}~{ds['window_time'].max().strftime('%H:%M')}")
+            else:
+                st.caption(f"{len(ds)} 个时间窗口")
+        else: 
+            st.info("等待数据...")
+    
+    with r3c3:
+        _HOUR_RANGES = {k: v for k, v in TIME_RANGES.items() if v >= 60 or v == 0}
+        col1, col2 = st.columns([3, 1])
+        with col1: st.subheader("小时发帖分布")
+        with col2: _t_hour = st.selectbox("时间", list(_HOUR_RANGES.keys()), index=2, key="hourly_time", label_visibility="collapsed")
+        df_hourly = _query_hourly_dist(_HOUR_RANGES[_t_hour])
+        if not df_hourly.empty:
+            fig = px.bar(df_hourly, x="hour", y="video_count", labels={"hour":"小时","video_count":"帖子数"})
+            fig.update_traces(marker_color="#2196F3")
+            fig.update_layout(height=280,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color=_fc,margin=dict(l=10,r=10,t=10,b=10))
+            fig.update_xaxes(dtick=2)
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(f"{len(df_hourly)} 个时段 · 峰值 {int(df_hourly['video_count'].max())} 条")
+        else: 
+            st.info("等待数据...")
+    st.markdown("---")
+
+    # ===== 用户画像分析（所有） =====
+    st.subheader("用户画像分析")
+    df_gender, df_loc_tot, df_user_tot = _query_profile(0)  # 所有
     r4c1,r4c2,r4c3 = st.columns(3)
     with r4c1:
         st.subheader("性别分布")
@@ -625,7 +699,7 @@ def main():
             g.index = g.index.map({"m":"男","f":"女"})
             fig = go.Figure(go.Pie(labels=g.index.tolist(), values=g.values.tolist(),
                 marker_colors=["#2196F3","#E91E63"],hole=0.5,textinfo="label+percent"))
-            fig.update_layout(height=280,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color="#ccc",showlegend=False,margin=dict(l=10,r=10,t=10,b=10))
+            fig.update_layout(height=280,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color=_fc,showlegend=False,margin=dict(l=10,r=10,t=10,b=10))
             st.plotly_chart(fig, use_container_width=True)
             st.caption(f"累计: 男{int(g.get('男',0))} 女{int(g.get('女',0))}")
         else: 
@@ -681,7 +755,7 @@ def main():
                     ),
                     height=350, margin=dict(l=5,r=5,t=5,b=5),
                     plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                    font_color="#ccc",
+                    font_color=_fc,
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 total_loc = int(df_map["count"].sum())
@@ -693,7 +767,7 @@ def main():
                         color=loc2.values, color_continuous_scale="Viridis")
                     fig.update_traces(textinfo="label+value", textfont_size=13)
                     fig.update_layout(height=280, plot_bgcolor="rgba(0,0,0,0)",
-                        paper_bgcolor="rgba(0,0,0,0)", font_color="#ccc",
+                        paper_bgcolor="rgba(0,0,0,0)", font_color=_fc,
                         margin=dict(l=5,r=5,t=5,b=5))
                     st.plotly_chart(fig, use_container_width=True)
                 else: 
@@ -707,15 +781,16 @@ def main():
             du = df_user_tot.set_index("user_name")["cnt"].iloc[::-1]
             fig = px.bar(du, y=du.index, x=du.values, orientation="h", color=du.values,
                         color_continuous_scale="Oranges", labels={"x":"发帖数","y":"用户"})
-            fig.update_layout(height=280,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color="#ccc",showlegend=False,margin=dict(l=10,r=10,t=10,b=10))
+            fig.update_layout(height=280,plot_bgcolor="rgba(0,0,0,0)",paper_bgcolor="rgba(0,0,0,0)",font_color=_fc,showlegend=False,margin=dict(l=10,r=10,t=10,b=10))
             st.plotly_chart(fig, use_container_width=True)
             st.caption(f"Cumulative TOP15 · 最高 {int(du.values[-1])} 条")
         else: 
             st.info("等待用户数据...")
     st.markdown("---")
 
-    # ===== 深度交叉分析 =====
-    st.subheader("深度交叉分析（{}）".format(time_range_cross))
+    # ===== 深度交叉分析（所有） =====
+    st.subheader("深度交叉分析")
+    df_len_tot, df_heat_tot, df_kw_trend = _query_cross_analysis(0)  # 所有
     da1, da2, da3 = st.columns(3)
 
     with da1:
@@ -724,7 +799,7 @@ def main():
             df_len_tot["text_len"] = df_len_tot["text_len"].clip(upper=200)
             fig = px.histogram(df_len_tot, x="text_len", nbins=25, color_discrete_sequence=["#00BCD4"])
             fig.update_layout(height=260, plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)", font_color="#ccc",
+                paper_bgcolor="rgba(0,0,0,0)", font_color=_fc,
                 margin=dict(l=10,r=10,t=20,b=10),
                 xaxis_title="字数", yaxis_title="帖子数")
             st.plotly_chart(fig, use_container_width=True)
@@ -740,7 +815,7 @@ def main():
             fig = px.density_heatmap(df_heat_tot, x="keyword", y="sentiment_cn", z="cnt",
                 color_continuous_scale="RdYlGn", text_auto=True)
             fig.update_layout(height=260, plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)", font_color="#ccc",
+                paper_bgcolor="rgba(0,0,0,0)", font_color=_fc,
                 margin=dict(l=10,r=10,t=20,b=10),
                 xaxis_title="", yaxis_title="情感")
             st.plotly_chart(fig, use_container_width=True)
@@ -755,7 +830,7 @@ def main():
                 labels={"cumulative":"累计帖子数","window_time":"时间"},
                 color_discrete_sequence=["#00BCD4"])
             fig.update_layout(height=260, plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)", font_color="#ccc",
+                paper_bgcolor="rgba(0,0,0,0)", font_color=_fc,
                 margin=dict(l=10,r=10,t=20,b=10))
             st.plotly_chart(fig, use_container_width=True)
             st.caption(f"当前累计 {int(df_kw_trend['cumulative'].iloc[-1]):,} 条")
@@ -764,8 +839,9 @@ def main():
 
     st.markdown("---")
 
-    # ===== 更多分析维度 =====
+    # ===== 更多分析维度（所有） =====
     st.subheader("更多分析维度")
+    df_r = _query_more_analysis(0)  # 所有
     mc1, mc2, mc3 = st.columns(3)
 
     with mc1:
@@ -782,7 +858,7 @@ def main():
                     color_discrete_map={"正向":"#4CAF50","中性":"#FFC107","负向":"#F44336"},
                     barmode="stack", labels={"count":"帖子数","location":"地区"})
                 fig.update_layout(height=260, plot_bgcolor="rgba(0,0,0,0)",
-                    paper_bgcolor="rgba(0,0,0,0)", font_color="#ccc",
+                        paper_bgcolor="rgba(0,0,0,0)", font_color=_fc,
                     legend=dict(orientation="h",y=1.15), margin=dict(l=10,r=10,t=20,b=10))
                 st.plotly_chart(fig, use_container_width=True)
                 st.caption(f"{area['location'].nunique()} 个省份 · {len(area)} 条帖子")
@@ -804,7 +880,7 @@ def main():
                     color_discrete_map={"正向":"#4CAF50","中性":"#FFC107","负向":"#F44336"},
                     barmode="stack", labels={"count":"帖子数","gender_cn":"性别"})
                 fig.update_layout(height=260, plot_bgcolor="rgba(0,0,0,0)",
-                    paper_bgcolor="rgba(0,0,0,0)", font_color="#ccc",
+                    paper_bgcolor="rgba(0,0,0,0)", font_color=_fc,
                     legend=dict(orientation="h",y=1.15), margin=dict(l=10,r=10,t=20,b=10))
                 st.plotly_chart(fig, use_container_width=True)
                 st.caption(f"男{len(gs[gs['gender']=='m'])} 女{len(gs[gs['gender']=='f'])}")
@@ -823,7 +899,7 @@ def main():
                 labels={"hour":"小时","users":"活跃用户数"},
                 color_discrete_sequence=["#AB47BC"])
             fig.update_layout(height=260, plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)", font_color="#ccc",
+                paper_bgcolor="rgba(0,0,0,0)", font_color=_fc,
                 margin=dict(l=10,r=10,t=20,b=10))
             fig.update_xaxes(dtick=2)
             st.plotly_chart(fig, use_container_width=True)
@@ -833,9 +909,9 @@ def main():
 
     st.markdown("---")
 
-    # ===== 词云 =====
-    st.subheader(f"关键词词云（{time_range_wordcloud}）")
-    wc_bytes = load_wordcloud(TIME_RANGES[time_range_wordcloud])
+    # ===== 词云（所有） =====
+    st.subheader("关键词词云")
+    wc_bytes = load_wordcloud(0)  # 所有
     if wc_bytes:
         st.image(wc_bytes, use_container_width=True)
         st.caption(f"基于 keyword_ranking TOP100 词频")
@@ -844,9 +920,78 @@ def main():
 
     st.markdown("---")
 
-    # ===== 话题聚类 =====
-    st.subheader(f"话题聚类分析（TF-IDF + KMeans 无监督聚类）（{time_range_topic}）")
-    topic_counts, topic_samples = load_topics(topic_time)
+    # ===== 关键词共现网络 =====
+    st.subheader("关键词共现网络")
+    _G, _kw_list, _count_dict = load_keyword_network()
+    if _G and len(_G.nodes()) > 0:
+        _max_n = max((_count_dict.get(n, 1) for n in _G.nodes()), default=1)
+        try:
+            from pyvis.network import Network
+            import tempfile, os
+            _bg_hex = T["bg"]  # 主题背景色
+            _fc_hex = _fc  # 图表字体色
+            net = Network(height="450px", width="100%", bgcolor=_bg_hex, font_color=_fc_hex)
+            net.from_nx(_G)
+            # 设置节点样式
+            for node in net.nodes:
+                n = node["id"]
+                size = 14 + 28 * (_count_dict.get(n, 1) / _max_n)
+                node["size"] = size
+                node["color"] = "#ff6b35"
+                node["font"] = {"size": 13, "color": _fc_hex}
+                node["title"] = f"{n}: {_count_dict.get(n, 0)}次"
+                node["borderWidth"] = 2
+                node["borderWidthSelected"] = 4
+            # 设置边样式
+            for edge in net.edges:
+                edge["color"] = "#4a6a9a"
+                edge["width"] = 2
+                edge["smooth"] = {"enabled": True, "type": "continuous"}
+                edge["opacity"] = 0.5
+            # 物理引擎 + 交互配置
+            net.set_options("""
+            {
+              "physics": {
+                "barnesHut": {
+                  "gravitationalConstant": -2500,
+                  "centralGravity": 0.2,
+                  "springLength": 180,
+                  "springConstant": 0.03,
+                  "damping": 0.08
+                },
+                "minVelocity": 0.5,
+                "solver": "barnesHut",
+                "stabilization": {"iterations": 300, "updateInterval": 10}
+              },
+              "edges": {"smooth": {"enabled": true, "type": "continuous"}},
+              "interaction": {
+                "dragNodes": true,
+                "dragView": true,
+                "zoomView": true,
+                "hover": true,
+                "tooltipDelay": 200,
+                "multiselect": false
+              }
+            }
+            """)
+            _tmp = os.path.join(tempfile.gettempdir(), "kw_network.html")
+            net.save_graph(_tmp)
+            with open(_tmp, "r", encoding="utf-8") as f:
+                html = f.read()
+            # 把 HTML body 背景也改成主题色
+            html = html.replace("<body>", f'<body style="background:{_bg_hex};">')
+            st.components.v1.html(html, height=460, scrolling=False)
+            st.caption(f"📌 拖拽节点自动弹开 · 节点越大热度越高 · 连线=关键词同现 · 数据来源最近500条帖子 · {len(_G.nodes())}词 {len(_G.edges())}条关联")
+        except Exception as e:
+            st.error(f"网络图加载失败: {e}")
+    else:
+        st.info("等待足够数据构建网络（至少需要2个关键词之间有共现关系）...")
+
+    st.markdown("---")
+
+    # ===== 话题聚类（所有） =====
+    st.subheader("话题聚类分析（TF-IDF + KMeans 无监督聚类）")
+    topic_counts, topic_samples = load_topics(0)  # 所有
     tc1, tc2 = st.columns([1.5, 2.5])
     with tc1:
         if not topic_counts.empty:
@@ -862,7 +1007,7 @@ def main():
                 height=380,
                 plot_bgcolor="rgba(0,0,0,0)",
                 paper_bgcolor="rgba(0,0,0,0)",
-                font_color="#ccc",
+                font_color=_fc,
                 showlegend=False,
                 margin=dict(l=10, r=10, t=10, b=10),
             )
@@ -887,12 +1032,12 @@ def main():
     # ===== 关键词排行明细 + 最新帖子动态 =====
     r5c1,r5c2 = st.columns(2)
     with r5c1:
-        st.subheader("关键词排行明细")
+        st.subheader("关键词排行明细（总量）")
         if not df_k.empty:
             st.dataframe(df_k.head(15), use_container_width=True, hide_index=True)
     
     with r5c2:
-        st.subheader("最新帖子动态")
+        st.subheader("最新帖子动态（所有）")
         if not df_r.empty:
             latest = df_r.head(15)[["window_time","keyword","user_name","gender","location","sentiment","text_preview"]].copy()
             latest["window_time"] = latest["window_time"].astype(str).str[:19]
@@ -906,14 +1051,22 @@ def main():
             st.info("等待数据...")
 
     # 情感明细
-    st.subheader("情感统计明细")
+    st.subheader("情感统计明细（所有）")
     if not df_s.empty:
         ds2 = df_s.head(10)[["window_time","positive","neutral","negative"]].copy()
         ds2["window_time"] = ds2["window_time"].astype(str)
         ds2.columns = ["时间","正面","中性","负面"]
         st.dataframe(ds2, use_container_width=True, hide_index=True)
 
-    st.caption(f"每15秒自动刷新 | 最后更新: {now}")
+    # ===== 访客统计 =====
+    _total_visitors, _online_users = _init_visitor()
+    st.markdown("---")
+    _online_icon = "🟢" if _online_users > 0 else "⚪"
+    st.markdown(f'<div style="display:flex;align-items:center;gap:20px;color:{_fc};font-size:0.85em">'
+                f'<span>👁️ 访问量 <strong>{_total_visitors}</strong></span>'
+                f'<span>{_online_icon} 在线 <strong>{_online_users}</strong></span>'
+                f'<span style="margin-left:auto">每15秒自动刷新 | 最后更新: {now} | 高考话题实时监控中心 v5</span>'
+                f'</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()

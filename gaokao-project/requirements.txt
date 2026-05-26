@@ -13,3 +13,5 @@ jieba==0.42.1
 httpx==0.28.1
 numpy==1.26.4
 pandas==2.2.3
+networkx==3.4.2
+pyvis==0.3.2
