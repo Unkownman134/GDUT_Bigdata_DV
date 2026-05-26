@@ -178,7 +178,7 @@ def _query_more_analysis(time_hours):
     conn = mysql.connector.connect(**MYSQL)
     time_cond = get_time_condition(time_hours)
     try:
-        df = pd.read_sql(f"SELECT keyword,user_name,gender,location,sentiment,text_preview,window_time FROM raw_posts WHERE {time_cond} ORDER BY id DESC LIMIT 500", conn)
+        df = pd.read_sql(f"SELECT keyword,user_name,gender,location,sentiment,text_preview,window_time FROM raw_posts WHERE {time_cond} ORDER BY id DESC LIMIT 3000", conn)
         if not df.empty: df["window_time"] = pd.to_datetime(df["window_time"])
     except: df = pd.DataFrame()
     conn.close()
@@ -310,7 +310,7 @@ def load_topics(time_hours=120):
         df = pd.read_sql(
             f"SELECT text_preview FROM raw_posts "
             f"WHERE LENGTH(text_preview)>=6 AND text_preview!='' AND {time_cond} "
-            "ORDER BY id DESC LIMIT 500",
+            "ORDER BY id DESC LIMIT 3000",
             conn
         )
     except:
@@ -399,7 +399,7 @@ def load_keyword_network():
     except:
         keywords = []
     try:
-        df = pd.read_sql("SELECT text_preview FROM raw_posts ORDER BY id DESC LIMIT 500", conn)
+        df = pd.read_sql("SELECT text_preview FROM raw_posts ORDER BY id DESC LIMIT 3000", conn)
     except:
         df = pd.DataFrame()
     conn.close()
