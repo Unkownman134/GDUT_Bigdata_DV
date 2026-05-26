@@ -475,6 +475,12 @@ def main():
     _tc_status = _tc
     _st_info_color = _tc
     
+    # 每15秒自动刷新（页面自动重载，保持数据最新）
+    components.html(
+        "<script>setInterval(function(){window.location.reload();}, 15000);</script>",
+        height=0, width=0,
+    )
+    
     st.markdown(f"""<style>
     .stApp{{background:{T["bg"]}}}.metric-card{{background:{T["card_bg"]};border-radius:12px;padding:16px;text-align:center;border:1px solid {T["card_border"]}}}
     .metric-value{{font-size:2em;font-weight:bold;color:{T["accent"]}}}.metric-label{{font-size:.8em;color:{T["label"]};margin-top:4px}}
